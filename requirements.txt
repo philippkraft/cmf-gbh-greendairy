@@ -1,0 +1,11 @@
+cmf
+pandas
+ipython
+jupyter
+numpy
+scipy
+openpyxl
+matplotlib
+tables
+networkx
+matplotlib

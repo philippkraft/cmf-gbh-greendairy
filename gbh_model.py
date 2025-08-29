@@ -42,8 +42,8 @@ def load_soilmoisture(fn: str):
     sm_df = pd.read_excel(fn, index_col=0)
 
     # Remove problematic data    
-    sm_calib = pd.DataFrame(index=sm_df[sm_df.index<'2023-09-12'].index, columns=['d40cm_mean','d40cm_std','d60cm_mean','d60cm_std'])
-    sm_valid = pd.DataFrame(index=sm_df[sm_df.index>'2023-10-23'].index, columns=['d40cm_mean','d40cm_std','d60cm_mean','d60cm_std'])
+    sm_calib = pd.DataFrame(index=sm_df[sm_df.index<'2024-05-01'].index, columns=['d40cm_mean','d40cm_std','d60cm_mean','d60cm_std'])
+    sm_valid = pd.DataFrame(index=sm_df[sm_df.index>'2024-05-01'].index, columns=['d40cm_mean','d40cm_std','d60cm_mean','d60cm_std'])
     
     sm_calib.d40cm_mean = sm_df[sm_df.columns[::2]].mean(1)
     sm_calib.d40cm_std = sm_df[sm_df.columns[::2]].std(1)
@@ -121,12 +121,13 @@ class Model:
         
         if self.structure.MACRO:
             self.parameters += [u('infexp', 0.001, 2.0, default=0.1, doc='Infiltration exponent for BROOK90 macropore infiltration')]
+        self.macropore_connections = []
 
 
         
         
     def create_nodes(self):
-        self.groundwater : cmf.DirichletBoundary = self.project.NewOutlet('gw', 0,0,-10)
+        self.groundwater : cmf.DirichletBoundary = self.project.NewOutlet('gw', 0,0,-2)
         self.runoff : cmf.DirichletBoundary = self.project.NewOutlet('runoff', 0,0,0)
         if self.structure.PERC == 1:
             self.cell.add_layer(1)
@@ -268,7 +269,7 @@ class Model:
         self.set_soil_capacity(p)
         self.parameterize_et(p)
         self.parameterize_perc(p)
-        self.parameterize_surf(p)
+        self.macropore_connections = self.parameterize_surf(p)
             
 
             
@@ -402,4 +403,12 @@ if __name__ == '__main__':
         p = spotpy.parameter.create_set(model, 'optguess')
         model.parameterize(p)
         print(cmf.describe(model.project))
+        sim = model.simulation(p, verbose=True)
+        sim_df = model.simulation_to_df(sim)
+        objf = model.objectivefunction(sim, model.evaluation())
+        print(f'RMSE40cm={objf[0]:0.3f}, RMSE60cm={objf[1]:0.3f}, '
+              f'P={objf[2]:0.3f}, ET={objf[3]:0.3f}, GW={objf[4]:0.3f}, RO={objf[5]:0.3f}')
+        print(sim_df.tail())
+
+
         # print(model.objectivefunction(model.simulation(spotpy.parameter.create_set(model, 'random')), model.evaluation()))
