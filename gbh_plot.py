@@ -11,7 +11,7 @@ from contextlib import contextmanager
 
 @contextmanager
 def get_data(code):
-    with tables.open_file(f'run2/gbh_{code}.h5') as res_file:
+    with tables.open_file(f'gbh_{code}.h5') as res_file:
         yield res_file.get_node('/data')
 
 
@@ -60,19 +60,19 @@ def dotty_plot(code, data, threshold):
     """
     Plots the distribution of parameters in the behavioural runs
     """
-    take = np.array(data.col('RMSEcalib')[:] < threshold)
+    take = np.array(data.col('RMSEcalib')[:] < threshold * 2)
     fig = plt.figure(figsize=(8, 8), dpi=100)
     p_names = data.colnames[6:-1]
     for i, pn in enumerate(p_names):
         plt.subplot(((len(p_names)-1) // 3) + 1, 3, i + 1)
         params = data.col(pn)[take]
-        plt.plot(params, data.col('RMSEcalib')[take], 'x')
+        plt.plot(params, -data.col('RMSEcalib')[take], '.', alpha=1/np.log10(np.sum(take)))
         # plt.title(pn.replace('_', ' '), loc='left', fontsize=10)
         try:
             gk = gaussian_kde(params)
             x = np.linspace(params.min(), params.max(), 1001)
             plt.ylabel('RMSEcalib')
-            plt.xlabel('pn.replace('_', ' ')')
+            plt.xlabel(pn.replace('_', ' '))
             plt.twinx()
             plt.plot(x, gk(x), 'r:')
             plt.yticks([])
@@ -106,15 +106,16 @@ def plot_validation(code, data, threshold):
     return fig
 
 def plot_moisture(code, data, threshold):
+    plot_hours = 3*365*24
     fig = plt.figure(figsize=(8,4), dpi=100)
-    sim_index = pd.date_range('2021-11-01','2024-01-01', freq='h')[:-1]
+    sim_index = pd.date_range('2021-11-01','2025-08-01', freq='h')[:-1]
     take = np.array(data.col('RMSEcalib')[:] < threshold)
-    for sim in data.col('simulation')[take, -365*24:]:
-        plt.plot(sim_index[-365*24:], sim[:,-2], color='blue', alpha=0.1)
-        plt.plot(sim_index[-365*24:], sim[:,-1], color='orange', alpha=0.1)
+    for sim in data.col('simulation')[take, -plot_hours:]:
+        plt.plot(sim_index[-plot_hours:], sim[:,-2], color='blue', alpha=0.1)
+        plt.plot(sim_index[-plot_hours:], sim[:,-1], color='orange', alpha=0.1)
         plt.title(f'Model {code}, RMSEcalib<{threshold:0.3f}')
     
-    for observation in load_soilmoisture():
+    for observation in load_soilmoisture('moisture.xlsx'):
         observation = observation[[c for c in observation.columns if 'mean' in c]]
         observation.plot(linestyle='--', ax=plt.gca())
     return fig

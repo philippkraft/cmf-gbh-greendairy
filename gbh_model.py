@@ -6,6 +6,8 @@ import spotpy
 import os
 import numpy as np
 import time
+import typing
+import re
 
 def load_weather(p: cmf.project, fn: str):
     """
@@ -14,6 +16,10 @@ def load_weather(p: cmf.project, fn: str):
 
     """
     weather_df = pd.read_excel(fn, index_col=0)
+    weather_df.columns = [
+        col[:col.index(' at ')].lower().replace(' ','_').replace('.','') 
+        for col in weather_df.columns
+    ]
     weather_df.loc[pd.isna(weather_df.global_radiation), 'global_radiation'] = 0.0
     weather_df.ffill(inplace=True)
     meteo: cmf.MeteoStation = p.meteo_stations.add_station(
@@ -56,95 +62,64 @@ def load_soilmoisture(fn: str):
     
     return sm_calib, sm_valid
 
-def u(name: str, lower: float, upper:float, default:float=None,doc=None):
+def load_kc(fn: str):
+    kc_df = pd.read_excel(fn, sheet_name='Kc_Verlauf', index_col='date')
+    kci = kc_df['Kc'].resample('d').interpolate()
+    rdi = kc_df['RootDepth80'].resample('d').interpolate()
+    return cmf.timeseries.from_pandas(kci), cmf.timeseries.from_pandas(rdi)
+
+def u(name: str, lower: float, upper:float, default:typing.Optional[float]=None,doc=None):
     "Creates a spotpy parameter with uniform distribution"
     return spotpy.parameter.Uniform(name, lower, upper, optguess=default, doc=doc)
 
+def ug(name: str, mean: float, sd:float, default:typing.Optional[float]=None, doc=None):
+    "Creates a spotpy parameter with uniform distribution around mean +/- 3*sd"
+    return spotpy.parameter.Uniform(name, mean - 3 * sd, mean + 3 * sd, optguess=default or mean, doc=doc)
 
-class Structure:
-    """
-    Stellt die Modellstrukturtypen da
-    """
-    def __init__(self, modelcode):
-        self.modelcode = str(modelcode)
-        self.ET = int(self.modelcode[4])
-        self.PERC = int(self.modelcode[3])
-        self.CANOPY = bool(int(self.modelcode[2])-1)
-        self.SURF = bool(int(self.modelcode[1])-1)
-        self.MACRO = bool(int(self.modelcode[0])-1)
-
-    def __str__(self):
-        return self.modelcode
+class Parameters:
+    DW = ug('DW', mean=18, sd=2, doc='Dead water in % of soil (> 4.2 pF)')
+    aFC = ug('aFC', mean=14.5, sd=1.2, doc='Plant available field capacity % of soil (4.2 - 2.5 pF)')
+    AC = ug('AC', mean=9.6, sd=2.5, doc='Air capacity in % of soil (< 2.5 pF)')
+    Ksat = u('Ksat', lower=0.05, upper=1, doc='Saturated hydraulic conductivity in m/d')
+    percexp = u('percexp', 1.0, 5.0, default=2.0, doc='Exponent for the power law percolation')
+    infexp = u('infexp', 0.001, 2.0, default=0.1, doc='Infiltration exponent for BROOK90 macropore infiltration')
+    
+    @classmethod
+    def as_list(cls):
+        return [p for p in vars(cls).values() if isinstance(p, spotpy.parameter.Base)]
     
 
 
 
 class Model:
-    def __init__(self, structure_code: str):
-        self.structure = Structure(structure_code)
-        path = '.' # os.path.dirname(__file__)
-        # self.data_fn = os.path.join(path, 'weatherstation.xlsx')
-        self.soilmoisture = load_soilmoisture('moisture.xlsx')        
+    def __init__(self):
+        self.soilmoisture = load_soilmoisture('moisture.xlsx') 
+        self.Kc, self.RootDepth = load_kc('Kc.xlsx')      
         cmf.set_parallel_threads(1)
 
         p = self.project = cmf.project()
         self.cell: cmf.Cell = p.NewCell(0,0,0, 1000)
-        self.meteo, self.rain = load_weather(p, 'weather.xlsx')
+        self.meteo, self.rain = load_weather(p, 'weather-2025.xlsx')
+        self.cell.vegetation.fraction_at_rootdepth = 0.8
         self.create_nodes()
         
-        self.parameters = [
-                u('soil_capacity',
-                    10, 1000, default=500,
-                    doc='Capacity of rooted zone in :math:`mm`'
-                ),
-                u('ETV1',
-                    0.1, 0.9, default=0.7,
-                    doc='Fraction of soil capacity where ET starts to be limited'
-                ),
-                u('ETV0', 0.0, 0.9, default=0.35, doc='Faction of ETV1 where wilting point is reached'),
-            ]
-        if self.structure.PERC == 3:
-            self.parameters += [
-                u('vg_alpha', 0.005, 0.1, default=0.01, doc='Van Genuchten alpha value'),
-                u('vg_n', 1.1, 1.8, default=1.2, doc='Van Genuchten alpha value'),
-                ]
-        else:
-            self.parameters += [
-                u('Sfc', 0.1, 1.0, default=0.7, doc='Fraction of capacity at field capacity in mm/mm. field capacity = Sfc * Smax'),
-                u('retention_time',
-                    1, 150, default=10,
-                    doc='Retention time in the soil water storage'
-                )
-            ]
-        if self.structure.PERC == 3 or self.structure.SURF:
-            self.parameters += [u('Ksat', 1, 200, default=50, doc='Ksat in mm/h')]
-        
-        if self.structure.MACRO:
-            self.parameters += [u('infexp', 0.001, 2.0, default=0.1, doc='Infiltration exponent for BROOK90 macropore infiltration')]
+        self.parameters = Parameters.as_list()
         self.macropore_connections = []
 
-
-        
+   
         
     def create_nodes(self):
         self.groundwater : cmf.DirichletBoundary = self.project.NewOutlet('gw', 0,0,-2)
         self.runoff : cmf.DirichletBoundary = self.project.NewOutlet('runoff', 0,0,0)
-        if self.structure.PERC == 1:
-            self.cell.add_layer(1)
-        elif self.structure.PERC == 2:
-            for d in [0.1, 0.3, 0.5, 0.7, 1.0]:
-                self.cell.add_layer(d)
-        elif self.structure.PERC == 3:
-            for d in np.arange(0.02, 1.01, 0.02):
-                self.cell.add_layer(d, cmf.VanGenuchtenMualem())
-        if self.structure.CANOPY:
-            self.canopy_storage_evaporation()
-        if self.structure.MACRO:
-            self.macro = self.cell.add_storage('macropores')
+        for d in [0.1, 0.3, 0.5, 0.7, 0.9, 1.1]:
+            self.cell.add_layer(d)
+        # self.canopy_storage_evaporation()
+        self.macro = self.cell.add_storage('macropores')
 
             
     
     def canopy_storage_evaporation(self):  
+        raise ValueError("Canopy storage not used in GBH model")
         # Make c.canopy a water storage
         self.cell.add_storage('Canopy','C')
         # Split the rainfall from the rain source (RS) between 
@@ -157,19 +132,23 @@ class Model:
         cmf.CanopyStorageEvaporation(self.cell.canopy, self.cell.evaporation, self.cell)
  
 
-    def set_soil_capacity(self, p) -> float:
+    def set_soil_capacity(self, p: Parameters) -> float:
         """
         Sets the upper soil capacity
         """
         for layer in self.cell.layers:
             # Parameterize soil water capacity
-            if self.structure.PERC == 3:
-                layer.soil.Phi = p.soil_capacity / self.cell.soildepth / 1000 
+            if layer.upper_boundary < 0.1:
+                AC = p.AC + 4
+            elif layer.upper_boundary < 0.3:
+                AC = p.AC + 2.5
             else:
-                layer.soil.porosity = p.soil_capacity / self.cell.soildepth / 1000 
+                AC = p.AC 
+            porosity = (p.DW + p.aFC + AC) / 100 # in m3/m3
+            layer.soil.porosity = porosity
             # Set initial value
             layer.wetness = 0.5
-        return p.soil_capacity
+        return porosity * self.cell.soildepth * self.cell.area  # in mm
 
         
     def inf_fraction(self, layer: cmf.SoilLayer, infexp: float, max_depth=None):
@@ -207,62 +186,47 @@ class Model:
         return (l/t)**infexp - (u/t)**infexp    
     
 
-    def parameterize_et(self, p):
-        self.cell.set_uptakestress(cmf.ContentStress(p.ETV1, p.ETV1 * p.ETV0))
-        if self.structure.ET == 1:
-            cmf.PriestleyTaylorET.use_for_cell(self.cell)
-        else:
-            cmf.PenmanMonteithET.use_for_cell(self.cell)
-            
-    def parameterize_perc(self, p):
-        if self.structure.SURF or self.structure.PERC == 3:
-            for layer in self.cell.layers:
-                layer.soil.Ksat = p.Ksat * 24 / 1000
+    def parameterize_et(self, p: Parameters):
+        ETV1 = (p.DW + p.aFC / 2) / 100
+        self.cell.set_uptakestress(cmf.ContentStress(ETV1, p.DW / 100))
+        cmf.PenmanMonteithET.use_for_cell(self.cell)
 
-        
-        if self.structure.PERC <= 2:
-            cmf.LinearStorageConnection(
-                self.cell.layers[-1], 
-                self.groundwater,
-                p.retention_time, 
-                residual = p.Sfc * self.cell.layers[-1].get_capacity()
-            )
-            for upper, lower in zip(self.cell.layers[:-1], self.cell.layers[1:]):
-                cmf.LinearStorageConnection(
-                    upper, 
-                    lower,
-                    p.retention_time, 
-                    residual = p.Sfc * upper.get_capacity()
-                )
-                
-        elif self.structure.PERC == 3:
-            cmf.FreeDrainagePercolation(self.cell.layers[-1], self.groundwater)
-            for upper, lower in zip(self.cell.layers[:-1], self.cell.layers[1:]):
-                cmf.Richards(upper, lower)
-            for layer in self.cell.layers:
-                layer.soil.alpha = p.vg_alpha
-                layer.soil.n = p.vg_n
-                layer.soil.fit_w0(w1=1.01, Psi_p=1.0)
+    def make_matrix_connection(self, upper: cmf.SoilLayer, lower: cmf.WaterStorage, p: Parameters):
+        C = upper.get_capacity()
+        Sfc = (p.aFC + p.DW) / 100 * C / upper.porosity  # in m³
+        return cmf.PowerLawConnection(
+            upper, 
+            lower,
+            Q0 = p.Ksat * upper.cell.area,  # in mm/d
+            V0 = C - Sfc,
+            beta = p.percexp,
+            residual = Sfc
+        )
+            
+    def parameterize_perc(self, p: Parameters):
+        for layer in self.cell.layers:
+            layer.soil.Ksat = p.Ksat  # in m/d
+        self.perc_connections = [
+            self.make_matrix_connection(upper, lower, p)
+            for upper, lower in zip(self.cell.layers, list(self.cell.layers[1:]) + [self.groundwater])
+        ]
 
     def parameterize_surf(self, p):
-        if self.structure.SURF:
-            cmf.ConceptualInfiltration(
-                self.cell.layers[0],
-                self.cell.surfacewater, 
-                0.95
-                )
-            cmf.WaterbalanceFlux(self.cell.surfacewater, self.runoff)
+        cmf.ConceptualInfiltration(
+            self.cell.layers[0],
+            self.cell.surfacewater, 
+            0.95
+            )
+        cmf.WaterbalanceFlux(self.cell.surfacewater, self.runoff)
             
-        if self.structure.MACRO:
-            # Get the flux fraction that should go to the deeper layers (=1-fraction for layer 0)
-            infiltration_to_deeper = 1 - self.inf_fraction(self.cell.layers[0], p.infexp)
-            pfr0 = cmf.PartitionFluxRoute(self.cell.surfacewater, self.cell.layers[0], self.macro, infiltration_to_deeper)
-            pfr = [
-                cmf.PartitionFluxRoute(self.cell.layers[0], self.macro, l, self.inf_fraction(l, p.infexp)/pfr0.fraction)
-                for l in self.cell.layers[1:]
-                ]
-            return [pfr0] + pfr
-
+        # Get the flux fraction that should go to the deeper layers (=1-fraction for layer 0)
+        infiltration_to_deeper = 1 - self.inf_fraction(self.cell.layers[0], p.infexp)
+        pfr0 = cmf.PartitionFluxRoute(self.cell.surfacewater, self.cell.layers[0], self.macro, infiltration_to_deeper)
+        pfr = [
+            cmf.PartitionFluxRoute(self.cell.layers[0], self.macro, l, self.inf_fraction(l, p.infexp)/pfr0.fraction)
+            for l in self.cell.layers[1:]
+            ]
+        return [pfr0] + pfr
 
 
     def parameterize(self, p):
@@ -270,90 +234,52 @@ class Model:
         self.parameterize_et(p)
         self.parameterize_perc(p)
         self.macropore_connections = self.parameterize_surf(p)
-            
 
+    def result(self, t=None):
+        """
+        Returns the actual model state at time t as a numpy array
+        """
+        t = t or self.meteo.T.begin
+        return np.array([
+            -self.cell.rain_source(t),
+            self.cell.transpiration(t) + self.cell.evaporation(t),
+            self.groundwater(t),
+            self.runoff(t),
+        ] + [l.theta for l in self.cell.layers[-3:]])
+    
+    def simulation_shape(self):
+        return len(self.meteo.T), len(self.result())
             
-        
-    def AMBAV_rss(self, JT: int):
-        #Simulation der Reifephase, Rss = Faktor 
-        JTs = 90
-        JTz = 120
-        JTmax=180  #Jahrestag des maximalen Wassersverbrauch 
-        JTe = 220
-        
-        rss = rssmin = 46 #Wert aus AMBAV Dokumentation -> ist auch rss min? 
-        
-        if JT>JTe or JT<JTs:
-            lai=0.3
-
-        elif JT>JTmax:
-            lai = 3.8
-            rss = rssmin + (
-                60 * (
-                    (JT-JTmax)/(JTmax+45-JTmax)
-                    )
-                ) + (              
-                150 * (
-                    (JT-JTmax)/(JTmax+45-JTmax)
-                    )**3
-                )
-        elif JT<JTz:
-            lai = 0.3 + (0.7 - 0.3)* (JT-JTs)/(JTz-JTs)
-        elif JT<=JTmax:
-            lai = 0.7 + (3.8-0.7) * (JT-JTz)/(JTmax-JTz)
-        
-        return lai, rss
-        
    
-    def Kc_WinterWeizen(self, JT: int):
-        JTs = 90
-        JTmax=180  #Jahrestag des maximalen Wassersverbrauch 
-        JTe = 220
-        if JT>JTe or JT<JTs:
-            return 0.4
-        elif JT<JTmax:
-            return 0.4 + (1.15 - 0.4)* (JT-JTs)/(JTmax-JTs)
-        else:
-            return 0.4 + (1.15 - 0.4)* (JTe-JT)/(JTe-JTmax)
-
-
     def simulation(self, p, verbose=False):
         
         self.parameterize(p)
-        solver = cmf.CVodeBanded(self.project, 1e-9)
+        solver = cmf.CVodeDense(self.project, 1e-9)
         result = []
         tstart = time.time()
         for t in solver.run(self.meteo.T.begin, self.meteo.T.end, cmf.h):
-            # Kill to slow running models
+            # Kill too slow running models
             if time.time() - tstart > 300:
-                return np.NaN * np.zeros((len(self.meteo.T), 6))
+                return np.nan * np.zeros((len(self.meteo.T), 6))
             ET = self.cell.transpiration(t) + self.cell.evaporation(t)
             GW = self.groundwater(t)
             P = -self.cell.rain_source(t)
             RO = self.runoff(t)
-            if self.structure.ET==2:
-                self.cell.vegetation.Kc = self.Kc_WinterWeizen(t.DOY())
-            if self.structure.ET==3:
-                self.cell.vegetation.LAI, self.cell.vegetation.rss = self.AMBAV_rss(t.DOY())
-                self.cell.vegetation.height = self.cell.vegetation.LAI / 3.8
+            self.cell.vegetation.Kc = self.Kc[t]
+            self.cell.vegetation.RootDepth = self.RootDepth[t]
             if verbose and not (solver.t % (cmf.day)).is_not_0():
                 V = self.cell.vegetation
-                print(f'{t:%Y-%m-%d %H:%M} : P={P:0.3f} ET={ET:0.3f} GW={GW:0.3f} RO={RO:0.3f}, LAI={V.LAI:0.2f}, Kc={V.Kc:0.2f}')
-            if self.structure.PERC == 1:
-                outputlayers = [self.cell.layers[0]] * 2
-            elif self.structure.PERC == 2:
-                outputlayers = [self.cell.layers[2], self.cell.layers[3]]
-            elif self.structure.PERC == 3:
-                outputlayers = [self.cell.layers[19], self.cell.layers[29]]
-            result.append([P, ET, GW, RO] + [l.theta for l in outputlayers])
+                print(f'{t:%Y-%m-%d %H:%M} : P={P:0.3f} ET={ET:0.3f} GW={GW:0.3f} RO={RO:0.3f}, LAI={V.LAI:0.2f}, Kc={V.Kc:0.2f}, RootD={V.RootDepth:0.2f}')
+            result.append(self.result(t))
             
         return np.array(result)
+    
     def simulation_to_df(self, simulation):
         sim_index = self.meteo.T.to_pandas().index
         return pd.DataFrame(
             data=simulation, 
             index=sim_index, 
-            columns = ['P','ET','GW', 'RO', 'theta_40cm', 'theta_60cm']
+            columns = ['P','ET','GW', 'RO', 'theta_40cm', 'theta_60cm', 'theta_100cm']
         )
         
     
@@ -361,24 +287,18 @@ class Model:
         
         calib = self.soilmoisture[0]
         return np.array(calib[['d40cm_mean', 'd60cm_mean']])
-
-    def mean_on_perc1(self, data):
-        if self.structure.PERC == 1:
-            return np.array(data).mean(1)
-        else:
-            return np.array(data)
         
     def objectivefunction(self, simulation, evaluation, params=None):
         if simulation is None:
-            return [np.NaN] * 6
+            return [np.nan] * 6
         sim_df = self.simulation_to_df(simulation)
         def rmse(eval, sim):
             return np.sqrt(np.nanmean((eval-sim)**2))
 
         compare = [
                 [
-                    self.mean_on_perc1(sm[['d40cm_mean', 'd60cm_mean']]), 
-                    self.mean_on_perc1(sim_df[sim_df.columns[-2:]].loc[sm.index])
+                    sm[['d40cm_mean', 'd60cm_mean']], 
+                    sim_df[sim_df.columns[-2:]].loc[sm.index]
                 ]
                 for sm in self.soilmoisture
         ]
@@ -386,29 +306,22 @@ class Model:
             try:
                 return rmse(ev, sim)
             except:
-                return np.NaN
+                return np.nan
 
         return [
             objf(np.array(cp[0]), np.array(cp[1]))
             for cp in compare
-        ] + list(simulation[-365*24:,:4].mean(0) * 365)
+        ] + list(simulation[-3*365*24:,:4].mean(0) * 365)
 
 if __name__ == '__main__':
     import sys
-    if len(sys.argv) < 2:
-        print('Usage: python gbh_model.py <model_code>')
-    else:
-        code = sys.argv[1]
-        model = Model(code)
-        p = spotpy.parameter.create_set(model, 'optguess')
-        model.parameterize(p)
-        print(cmf.describe(model.project))
-        sim = model.simulation(p, verbose=True)
-        sim_df = model.simulation_to_df(sim)
-        objf = model.objectivefunction(sim, model.evaluation())
-        print(f'RMSE40cm={objf[0]:0.3f}, RMSE60cm={objf[1]:0.3f}, '
-              f'P={objf[2]:0.3f}, ET={objf[3]:0.3f}, GW={objf[4]:0.3f}, RO={objf[5]:0.3f}')
-        print(sim_df.tail())
-
-
-        # print(model.objectivefunction(model.simulation(spotpy.parameter.create_set(model, 'random')), model.evaluation()))
+    model = Model()
+    p = spotpy.parameter.create_set(model, 'optguess')
+    model.parameterize(p)
+    print(cmf.describe(model.project))
+    sim = model.simulation(p, verbose=True)
+    sim_df = model.simulation_to_df(sim)
+    objf = model.objectivefunction(sim, model.evaluation())
+    print(f'RMSE40cm={objf[0]:0.3f}, RMSE60cm={objf[1]:0.3f}, '
+            f'P={objf[2]:0.3f}, ET={objf[3]:0.3f}, GW={objf[4]:0.3f}, RO={objf[5]:0.3f}')
+    print(sim_df.tail())
