@@ -164,8 +164,13 @@ def run(parameterset=None):
 
 if __name__ == '__main__':
     import sys
+    try:
+        runs = int(sys.argv[1])
+    except (IndexError, ValueError):
+        runs = 1000   
+
     today = datetime.datetime.now().strftime('%Y-%m-%d')
-    run_lhs(f'KA6-{today}', 10000)
+    run_lhs(f'KA6-{today}', runs)
     from gbh_plot import run as plot_run
     plot_run(f'KA6-{today}')
 

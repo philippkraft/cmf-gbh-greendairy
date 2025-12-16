@@ -125,10 +125,10 @@ def plot_boundary(code, data, threshold):
     take = np.array(data.col('RMSEcalib')[:] < threshold)
     sim = np.cumsum(data.col('simulation')[take,-365*24:,:4].T/24, 1)
     sim_index = pd.date_range('2021-11-01','2024-01-01', freq='h')[:-1][-365*24:]    
+    plt.plot(sim_index, sim[3], alpha=0.3, label='RO', c='r')
     plt.plot(sim_index, sim[0], alpha=0.3, label='P', c='b') 
     plt.plot(sim_index, sim[1], alpha=0.3, label='ET', c='g')
     plt.plot(sim_index, sim[2], alpha=0.3, label='GW', c='c')
-    plt.plot(sim_index, sim[3], alpha=0.3, label='RO', c='r')
     plt.ylabel('mm')
     plt.title(f'Model {code}, RMSEcalib<{threshold:0.3f}')
     return fig

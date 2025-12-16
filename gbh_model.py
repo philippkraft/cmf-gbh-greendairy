@@ -82,7 +82,7 @@ class Parameters:
     AC = ug('AC', mean=9.6, sd=2.5, doc='Air capacity in % of soil (< 2.5 pF)')
     Ksat = u('Ksat', lower=0.05, upper=1, doc='Saturated hydraulic conductivity in m/d')
     percexp = u('percexp', 1.0, 5.0, default=2.0, doc='Exponent for the power law percolation')
-    infexp = u('infexp', 0.001, 2.0, default=0.1, doc='Infiltration exponent for BROOK90 macropore infiltration')
+    infexp = u('infexp', 0, 0.5, default=0, doc='Infiltration exponent for BROOK90 macropore infiltration')
     
     @classmethod
     def as_list(cls):
@@ -148,7 +148,6 @@ class Model:
             layer.soil.porosity = porosity
             # Set initial value
             layer.wetness = 0.5
-        return porosity * self.cell.soildepth * self.cell.area  # in mm
 
         
     def inf_fraction(self, layer: cmf.SoilLayer, infexp: float, max_depth=None):
@@ -193,7 +192,7 @@ class Model:
 
     def make_matrix_connection(self, upper: cmf.SoilLayer, lower: cmf.WaterStorage, p: Parameters):
         C = upper.get_capacity()
-        Sfc = (p.aFC + p.DW) / 100 * C / upper.porosity  # in m³
+        Sfc = (p.aFC + p.DW) / 100 * upper.thickness * upper.cell.area  # in m³
         return cmf.PowerLawConnection(
             upper, 
             lower,
@@ -220,13 +219,16 @@ class Model:
         cmf.WaterbalanceFlux(self.cell.surfacewater, self.runoff)
             
         # Get the flux fraction that should go to the deeper layers (=1-fraction for layer 0)
-        infiltration_to_deeper = 1 - self.inf_fraction(self.cell.layers[0], p.infexp)
-        pfr0 = cmf.PartitionFluxRoute(self.cell.surfacewater, self.cell.layers[0], self.macro, infiltration_to_deeper)
-        pfr = [
-            cmf.PartitionFluxRoute(self.cell.layers[0], self.macro, l, self.inf_fraction(l, p.infexp)/pfr0.fraction)
-            for l in self.cell.layers[1:]
-            ]
-        return [pfr0] + pfr
+        if hasattr(p, 'infexp') and p.infexp > 0:
+            infiltration_to_deeper = 1 - self.inf_fraction(self.cell.layers[0], p.infexp)
+            pfr0 = cmf.PartitionFluxRoute(self.cell.surfacewater, self.cell.layers[0], self.macro, infiltration_to_deeper)
+            pfr = [
+                cmf.PartitionFluxRoute(self.cell.layers[0], self.macro, l, self.inf_fraction(l, p.infexp)/pfr0.fraction)
+                for l in self.cell.layers[1:]
+                ]
+            return [pfr0] + pfr
+        else:
+            return []
 
 
     def parameterize(self, p):
