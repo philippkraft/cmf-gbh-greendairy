@@ -133,6 +133,30 @@ def plot_boundary(code, data, threshold):
     plt.title(f'Model {code}, RMSEcalib<{threshold:0.3f}')
     return fig
 
+def result(code, data, threshold):
+    """
+    Creates a DataFrame with summary statistics of the behavioural simulations
+    
+    """
+    take = np.array(data.col('RMSEcalib')[:] < threshold)
+    sim = data.col('simulation')[take]
+    sim_index = pd.date_range('2020-08-26 12:00:00', periods=sim.shape[1], freq='h')
+    columns = ['P','ET','GW', 'RO', 'theta_40cm', 'theta_60cm', 'theta_100cm']
+    functions = 'mean', 'std', 'min', 'max', 'p5', 'p25', 'p75', 'p95'
+    def do(s,data,axis):
+         if s[0] == 'p':
+             return np.percentile(data, int(s[1:]), axis=axis)
+         else:
+             return getattr(np, s)(data, axis=axis)
+    df = pd.concat([
+        pd.DataFrame(
+            data=do(func, sim, axis=0),
+            index=sim_index,
+            columns=[c + '_' + func for c in columns]
+        )
+        for func in functions
+    ], axis=1)
+    return df
 
 def run(code):
     with get_data(code) as data:
@@ -142,6 +166,7 @@ def run(code):
         plot_validation(code, data, threshold).savefig(f'fig/fig_{code}_validation.png')
         plot_moisture(code, data, threshold).savefig(f'fig/fig_{code}_moisture.png')
         plot_boundary(code, data, threshold).savefig(f'fig/fig_{code}_boundary.png')
+        result(code, data, threshold).to_excel(f'results_{code}.xlsx')  
         return get_tabdata(code, data, threshold)
 
 
