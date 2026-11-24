@@ -1,9 +1,9 @@
 """
+A soil water model for Gladbacherhof, at the Greendairy experimental fields
 """
 import cmf
 import pandas as pd
 import spotpy
-import os
 import numpy as np
 import time
 import typing
@@ -45,6 +45,9 @@ def load_weather(p: cmf.project, fn: str):
     return meteo, rain
 
 def load_soilmoisture(fn: str):
+    """
+    Loads soil moisture calibration data from excel and cleans the dataset
+    """
     sm_df = pd.read_excel(fn, index_col=0)
 
     # Remove problematic data    
@@ -63,6 +66,10 @@ def load_soilmoisture(fn: str):
     return sm_calib, sm_valid
 
 def load_kc(fn: str):
+    """
+    Loads Kc Values (ETpot/ETref) from an excel table to include crop growth as a driving factor for potential. 
+    The Kc values are derived from the FAO https://www.fao.org/4/x0490e/x0490e0b.htm#tabulated%20kc%20values
+    """
     kc_df = pd.read_excel(fn, sheet_name='Kc_Verlauf', index_col='date')
     kci = kc_df['Kc'].resample('d').interpolate()
     rdi = kc_df['RootDepth80'].resample('d').interpolate()
@@ -77,6 +84,9 @@ def ug(name: str, mean: float, sd:float, default:typing.Optional[float]=None, do
     return spotpy.parameter.Uniform(name, mean - 3 * sd, mean + 3 * sd, optguess=default or mean, doc=doc)
 
 class Parameters:
+    """
+    Contains the parameters for the model
+    """
     DW = ug('DW', mean=18, sd=2, doc='Dead water in % of soil (> 4.2 pF)')
     aFC = ug('aFC', mean=14.5, sd=1.2, doc='Plant available field capacity % of soil (4.2 - 2.5 pF)')
     AC = ug('AC', mean=9.6, sd=2.5, doc='Air capacity in % of soil (< 2.5 pF)')
@@ -92,6 +102,9 @@ class Parameters:
 
 
 class Model:
+    """
+    Class that contains the Gladbacherhof tipping bucket soil model
+    """
     def __init__(self):
         self.soilmoisture = load_soilmoisture('moisture.xlsx') 
         self.Kc, self.RootDepth = load_kc('Kc.xlsx')      
@@ -109,29 +122,16 @@ class Model:
    
         
     def create_nodes(self):
+        """
+        Creates the layers and boundary conditions of the model
+        """
         self.groundwater : cmf.DirichletBoundary = self.project.NewOutlet('gw', 0,0,-2)
         self.runoff : cmf.DirichletBoundary = self.project.NewOutlet('runoff', 0,0,0)
         for d in [0.1, 0.3, 0.5, 0.7, 0.9, 1.1]:
             self.cell.add_layer(d)
-        # self.canopy_storage_evaporation()
         self.macro = self.cell.add_storage('macropores')
 
             
-    
-    def canopy_storage_evaporation(self):  
-        raise ValueError("Canopy storage not used in GBH model")
-        # Make c.canopy a water storage
-        self.cell.add_storage('Canopy','C')
-        # Split the rainfall from the rain source (RS) between 
-        # intercepted rainfall (RS->canopy) and throughfall (RS-surface)
-        cmf.Rainfall(self.cell.canopy, self.cell, False, True) # RS->canopy, only intercepted rain
-        cmf.Rainfall(self.cell.surfacewater, self.cell, True, False) # RS->surface, only throughfall
-        # Use an overflow mechanism, eg. the famous Rutter-Interception Model
-        cmf.RutterInterception(self.cell.canopy, self.cell.surfacewater, self.cell) 
-        # And now the evaporation from the wet canopy (using a classical Penman equation)
-        cmf.CanopyStorageEvaporation(self.cell.canopy, self.cell.evaporation, self.cell)
- 
-
     def set_soil_capacity(self, p: Parameters) -> float:
         """
         Sets the upper soil capacity
@@ -186,11 +186,17 @@ class Model:
     
 
     def parameterize_et(self, p: Parameters):
+        """
+        Sets model parameters for evapotranspiration
+        """
         ETV1 = (p.DW + p.aFC / 2) / 100
         self.cell.set_uptakestress(cmf.ContentStress(ETV1, p.DW / 100))
         cmf.PenmanMonteithET.use_for_cell(self.cell)
 
     def make_matrix_connection(self, upper: cmf.SoilLayer, lower: cmf.WaterStorage, p: Parameters):
+        """
+        Creates the tipping bucket overflow from one layer to the next
+        """
         C = upper.get_capacity()
         Sfc = (p.aFC + p.DW) / 100 * upper.thickness * upper.cell.area  # in m³
         return cmf.PowerLawConnection(
@@ -203,6 +209,9 @@ class Model:
         )
             
     def parameterize_perc(self, p: Parameters):
+        """
+        Adds the percolation model
+        """
         for layer in self.cell.layers:
             layer.soil.Ksat = p.Ksat  # in m/d
         self.perc_connections = [
@@ -211,6 +220,9 @@ class Model:
         ]
 
     def parameterize_surf(self, p):
+        """
+        Creates the infiltration model at the surface
+        """
         cmf.ConceptualInfiltration(
             self.cell.layers[0],
             self.cell.surfacewater, 
@@ -232,6 +244,9 @@ class Model:
 
 
     def parameterize(self, p):
+        """
+        Parameterizes the whole model
+        """
         self.set_soil_capacity(p)
         self.parameterize_et(p)
         self.parameterize_perc(p)
@@ -254,7 +269,9 @@ class Model:
             
    
     def simulation(self, p, verbose=False):
-        
+        """
+        Runs the model and saves the result
+        """
         self.parameterize(p)
         solver = cmf.CVodeDense(self.project, 1e-9)
         result = []
@@ -277,6 +294,9 @@ class Model:
         return np.array(result)
     
     def simulation_to_df(self, simulation):
+        """
+        Creates a time indexed dataframe from the model result
+        """
         sim_index = self.meteo.T.to_pandas().index
         return pd.DataFrame(
             data=simulation, 
@@ -284,13 +304,17 @@ class Model:
             columns = ['P','ET','GW', 'RO', 'theta_40cm', 'theta_60cm', 'theta_100cm']
         )
         
-    
     def evaluation(self):
-        
+        """
+        Returns the evaluation data to calculate the objective function
+        """
         calib = self.soilmoisture[0]
         return np.array(calib[['d40cm_mean', 'd60cm_mean']])
         
     def objectivefunction(self, simulation, evaluation, params=None):
+        """
+        Returns the RMSE for 40 and 60cm depth soilmoisture modelled vs. measured
+        """
         if simulation is None:
             return [np.nan] * 6
         sim_df = self.simulation_to_df(simulation)

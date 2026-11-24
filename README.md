@@ -1,93 +1,72 @@
-# cmf-gbh-greendairy
+# Gladbacherhof Root-Zone Water Balance Model (`gbh_model`)
 
+A plot-scale root-zone soil water balance and groundwater recharge model implemented with the **Catchment Modelling Framework (CMF)** ([Kraft et al., 2011](https://doi.org/10.1016/j.envsoft.2011.02.006)) and **PyTables/HDF5** ensemble workflows for the **Greendairy** experimental fields at **Gladbacherhof**.
 
+---
 
-## Getting started
+## Scientific Context
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+This code supports the joint manuscript investigating nitrate leaching dynamics in crop rotations of an organic dairy farming system, specifically addressing:
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+1. Quantification of nitrate leaching from soils under crop rotations in an organic dairy farming system.
+2. Comparison of nitrate leaching estimates derived from soil $N_{\min}$ sampling against suction cup measurements combined with model-based soil water balance estimates.
+3. Identification of dominant nitrogen sources contributing to nitrate in leachate water using $\delta^{15}\text{N}$ natural abundance.
 
-## Add your files
+Within this workflow, the hydrological model simulates root-zone water fluxes and groundwater recharge (drainage leaving the bottom of the soil profile) to be coupled with measured nitrate-N concentration time series across an ensemble of behavioural parameter sets.
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+---
 
+## Repository Structure
+
+| File | Purpose |
+| :--- | :--- |
+| `gbh_model.py` | Core CMF root-zone water balance model (`Model`), parameter definitions (`Parameters`), and input data loaders (`load_weather`, `load_soilmoisture`, `load_kc`). |
+| `gbh_runner.py` | Parallel Latin Hypercube Sampling (LHS) ensemble runner (`Runner`, `run_lhs`) writing simulation results and summary metrics to HDF5 (`gbh_<code>.h5`) via PyTables. |
+| `gbh_plot.py` | Post-processing, GLUE-style thresholding, parameter/flux diagnostics (dotty plots, equifinality, validation scatter, soil moisture & boundary flux plots), and Excel exports. |
+
+---
+
+## Model Overview (`gbh_model.py`)
+
+### Spatial Domain & Boundary Conditions
+* **Plot-scale cell:** Single CMF cell (`1000 m²` area) with hourly meteorological and rainfall forcing (`cmf.h`).
+* **Soil profile:** Six soil layers down to `1.10 m` depth (`0.1, 0.3, 0.5, 0.7, 0.9, 1.1 m` lower boundaries), plus a `macropores` storage (`self.cell.add_storage('macropores')`). *(Note: Ensure the manuscript text matches the 6 layers implemented in `create_nodes()`.)*
+* **Boundary outlets:** Dirichlet boundary outlets for groundwater (`gw` at `z = -2 m`) and surface runoff (`runoff` at `z = 0 m`).
+
+### Hydrological Processes
+* **Soil water capacity & initial wetness:** Layer porosity is derived from dead water (`DW`, $> 4.2\ \text{pF}$), plant-available field capacity (`aFC`, $2.5\text{–}4.2\ \text{pF}$), and air capacity (`AC`, $< 2.5\ \text{pF}$, with depth-dependent adjustments in the top two intervals), initialized at `wetness = 0.5`.
+* **Evapotranspiration:** Driven by hourly weather inputs (`air_temperature`, `rel_humidity`, `wind_speed`, `global_radiation`, `sunshine_fraction`) and daily interpolated crop coefficients (`Kc`) and rooting depths (`RootDepth80`), using `cmf.PenmanMonteithET` and `cmf.ContentStress`.
+* **Surface infiltration & macropores:** Surface water routing via `cmf.ConceptualInfiltration` and `cmf.WaterbalanceFlux`, with optional BROOK90-style infiltration partitioning (`infexp`) into `macropores` and deeper layers via `cmf.PartitionFluxRoute`.
+* **Vertical percolation (tipping-bucket / power-law):** Layer-to-layer and bottom drainage connections (`cmf.PowerLawConnection`) parameterized by saturated hydraulic conductivity (`Ksat`), field capacity storage (`Sfc`), and percolation exponent (`percexp`), integrated over hourly steps with `cmf.CVodeDense(project, 1e-9)`.
+
+### Model Parameters (`Parameters`)
+* `DW`: Dead water (% of soil, $> 4.2\ \text{pF}$) — uniform around mean `18` (`sd = 2`, $\pm 3\ \text{SD}$).
+* `aFC`: Plant-available field capacity (% of soil, $2.5\text{–}4.2\ \text{pF}$) — uniform around mean `14.5` (`sd = 1.2`, $\pm 3\ \text{SD}$).
+* `AC`: Air capacity (% of soil, $< 2.5\ \text{pF}$) — uniform around mean `9.6` (`sd = 2.5`, $\pm 3\ \text{SD}$).
+* `Ksat`: Saturated hydraulic conductivity ($\text{m d}^{-1}$) — uniform on `[0.05, 1.0]`.
+* `percexp`: Exponent for power-law percolation — uniform on `[1.0, 5.0]` (default `2.0`).
+* `infexp`: Infiltration exponent for BROOK90 macropore infiltration — uniform on `[0, 0.5]` (default `0`).
+
+---
+
+## Input Data Requirements
+
+The scripts expect local Excel input files in the working directory (adjust paths in code if needed):
+
+1. **`weather-2025.xlsx`** (loaded by `load_weather`):
+   * Time-indexed hourly weather table. Column names are parsed before `' at '` (lowercased, spaces replaced by `'_'`, periods removed) to match:
+     `air_temperature`, `rel_humidity`, `wind_speed`, `global_radiation`, `sunshine_fraction`, and `rainfall`.
+2. **`moisture.xlsx`** (loaded by `load_soilmoisture`):
+   * Time-indexed soil water content observations (e.g., TEROS 10 sensors at `40 cm` and `60 cm` depth). Even-indexed columns (`::2`) are aggregated as `40 cm` (`d40cm_mean`, `d40cm_std`) and odd-indexed columns (`1::2`) as `60 cm` (`d60cm_mean`, `d60cm_std`), split around `'2024-05-01'`.
+3. **`Kc.xlsx`** (loaded by `load_kc`):
+   * Sheet `'Kc_Verlauf'` indexed by `'date'`, containing `'Kc'` and `'RootDepth80'`, resampled daily (`'d'`) and linearly interpolated.
+
+---
+
+## Installation & Dependencies
+
+Install `cmf` and the supporting Python packages:
+
+```bash
+pip install cmf numpy pandas scipy matplotlib tables spotpy openpyxl
 ```
-cd existing_repo
-git remote add origin https://gitlab.ub.uni-giessen.de/mp111/cmf-gbh-greendairy.git
-git branch -M main
-git push -uf origin main
-```
-
-## Integrate with your tools
-
-- [ ] [Set up project integrations](https://gitlab.ub.uni-giessen.de/mp111/cmf-gbh-greendairy/-/settings/integrations)
-
-## Collaborate with your team
-
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
-
-## Test and Deploy
-
-Use the built-in continuous integration in GitLab.
-
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
